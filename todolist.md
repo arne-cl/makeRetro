@@ -78,21 +78,40 @@ None - Setup complete and working!
   - Save and apply settings without editing files
   - Maintains all original system monitoring features
 
+## Latest Update (2025-08-16 - Part 3)
+
+### Pointer Control Feature Added:
+✅ **Multiple pointer modes**:
+  - USB Tablet (seamless, no grab needed)
+  - USB Mouse (traditional grab/ungrab)
+  - PS/2 Mouse (legacy support)
+✅ **Configurable mouse grab behavior**
+✅ **Auto-updates existing installations**
+✅ **Settings integrated in Mac OS 9-style control panel**
+
 ## Final Version (2025-08-16)
 
-### Key Features of setup-retro-mac.sh (1512 lines):
+### Key Features of setup-retro-mac.sh (1750+ lines):
 ✅ **Smart User Detection**: Automatically detects and uses non-root user for auto-login
 ✅ **Self-Healing**: Detects and fixes existing installations with wrong configurations
 ✅ **Validation Checks**: Validates all configuration files and fixes issues
 ✅ **Complete Configuration Management**: Full QEMU configuration via JSON and web UI
+✅ **Mac OS 9 Styled Interface**: Authentic Platinum-style control panel
+✅ **Pointer Control**: Multiple mouse modes with configurable grab behavior
 ✅ **Idempotent**: Safe to run multiple times without breaking anything
 
-### Final Fixes Applied:
-- Auto-login now properly uses 'retro' user (not root)
+### Final Enhancements:
+- **Mac OS 9 UI**: Complete redesign with authentic Mac OS 8/9 "Platinum" interface
+  - Classic menu bar with Apple menu
+  - Striped window title bars
+  - 3D beveled buttons and controls
+  - Classic Mac color scheme and styling
+  - Tabbed interface for configuration
+- Auto-login properly uses 'retro' user (not root)
 - QEMU service runs as retro user with correct permissions
-- Configuration validation ensures everything is set up correctly
-- Script can detect and fix installations that were configured incorrectly
+- Log file permissions automatically fixed
+- All features embedded in single script file
 
 ## Files Created
-- `setup-retro-mac.sh` - Complete single-file installation and repair script (1512 lines)
+- `setup-retro-mac.sh` - Complete single-file installation script with Mac OS 9 styled UI (1651 lines, 59KB)
 - `todolist.md` - This tracking document

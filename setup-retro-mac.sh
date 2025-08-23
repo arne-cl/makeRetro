@@ -141,6 +141,48 @@ EOF
     return 1
 }
 
+# Function to update existing installation with new features
+update_pointer_control() {
+    print_status "Checking for pointer control updates..."
+    
+    # Update QEMU configuration with pointer settings if not present
+    if [ -f "/opt/retro-mac/qemu-config.json" ]; then
+        # Check if pointer_mode exists in config
+        if ! jq -e '.pointer_mode' /opt/retro-mac/qemu-config.json >/dev/null 2>&1; then
+            print_status "Adding pointer control settings to configuration..."
+            
+            # Add pointer settings to config
+            jq '. + {"pointer_mode": "usb-tablet", "grab_on_click": true}' /opt/retro-mac/qemu-config.json > /tmp/qemu-config-new.json
+            mv /tmp/qemu-config-new.json /opt/retro-mac/qemu-config.json
+            chmod 644 /opt/retro-mac/qemu-config.json
+            chown www-data:www-data /opt/retro-mac/qemu-config.json 2>/dev/null || true
+            
+            print_success "Pointer control settings added to configuration"
+        fi
+    fi
+    
+    # Update startup script if it exists and is outdated
+    if [ -f "/opt/retro-mac/start-mac.sh" ]; then
+        if ! grep -q "POINTER_MODE" /opt/retro-mac/start-mac.sh; then
+            print_status "Updating QEMU startup script with pointer control..."
+            
+            # Backup existing script
+            cp /opt/retro-mac/start-mac.sh /opt/retro-mac/start-mac.sh.backup-$(date +%Y%m%d)
+            
+            # Extract the new startup script from this file and update
+            awk '/^cat > \/opt\/retro-mac\/start-mac.sh << .EOF.$/{flag=1; next} /^EOF$/ && flag{flag=0} flag' "$0" > /opt/retro-mac/start-mac.sh
+            chmod +x /opt/retro-mac/start-mac.sh
+            
+            # Set proper ownership
+            if id retro >/dev/null 2>&1; then
+                chown retro:retro /opt/retro-mac/start-mac.sh
+            fi
+            
+            print_success "QEMU startup script updated with pointer control"
+        fi
+    fi
+}
+
 # Main setup begins here
 main() {
     echo "=========================================="
@@ -154,14 +196,28 @@ main() {
     # Check if this is fixing an existing installation
     if [ -f "/opt/retro-mac/start-mac.sh" ] && [ -f "/etc/systemd/system/qemu-mac.service" ]; then
         print_status "Existing installation detected"
+        
+        # Try to fix any configuration issues
+        FIXED=false
         if fix_existing_installation; then
+            FIXED=true
+        fi
+        
+        # Update with new features
+        update_pointer_control
+        
+        if [ "$FIXED" = true ]; then
             echo ""
             echo "=========================================="
-            echo "Existing Installation Fixed!"
+            echo "Existing Installation Updated!"
             echo "=========================================="
             echo ""
-            echo "The configuration has been corrected."
-            echo "You should now have auto-login working properly."
+            echo "The configuration has been corrected and updated."
+            echo "New features added:"
+            echo "• Pointer control settings (USB Tablet/Mouse/PS2)"
+            echo "• Mouse grab configuration"
+            echo ""
+            echo "Access the web control panel to configure pointer settings."
             echo ""
             exit 0
         fi
@@ -380,7 +436,9 @@ EOF
     "hard_drives": [],
     "custom_args": "",
     "network": "user",
-    "sound": true
+    "sound": true,
+    "pointer_mode": "usb-tablet",
+    "grab_on_click": true
 }
 EOF
     chmod 644 /opt/retro-mac/qemu-config.json
@@ -421,6 +479,8 @@ if [ -f "$CONFIG_FILE" ]; then
     CUSTOM_ARGS=$(jq -r '.custom_args // ""' "$CONFIG_FILE")
     NETWORK=$(jq -r '.network // "user"' "$CONFIG_FILE")
     SOUND=$(jq -r '.sound // true' "$CONFIG_FILE")
+    POINTER_MODE=$(jq -r '.pointer_mode // "usb-tablet"' "$CONFIG_FILE")
+    GRAB_ON_CLICK=$(jq -r '.grab_on_click // true' "$CONFIG_FILE")
 else
     # Defaults if config doesn't exist
     RAM="512"
@@ -433,6 +493,8 @@ else
     CUSTOM_ARGS=""
     NETWORK="user"
     SOUND="true"
+    POINTER_MODE="usb-tablet"
+    GRAB_ON_CLICK="true"
 fi
 
 # Build QEMU command
@@ -442,8 +504,25 @@ CMD="$CMD -m $RAM"
 CMD="$CMD -cpu $CPU"
 CMD="$CMD -g $RESOLUTION"
 CMD="$CMD -boot $BOOT"
-CMD="$CMD -device usb-mouse"
-CMD="$CMD -device usb-kbd"
+
+# Configure pointer/mouse based on settings
+if [ "$POINTER_MODE" = "usb-tablet" ]; then
+    # USB tablet provides absolute positioning (no grab needed)
+    CMD="$CMD -device usb-tablet"
+    CMD="$CMD -device usb-kbd"
+elif [ "$POINTER_MODE" = "usb-mouse" ]; then
+    # USB mouse with relative positioning (traditional grab)
+    CMD="$CMD -device usb-mouse"
+    CMD="$CMD -device usb-kbd"
+elif [ "$POINTER_MODE" = "ps2" ]; then
+    # PS/2 mouse (legacy)
+    # PS/2 devices are included by default in mac99
+    CMD="$CMD -device usb-kbd"
+else
+    # Default to USB tablet
+    CMD="$CMD -device usb-tablet"
+    CMD="$CMD -device usb-kbd"
+fi
 
 # Add CDROM if specified
 if [ -n "$CDROM" ] && [ "$CDROM" != "null" ] && [ -f "$CDROM" ]; then
@@ -479,8 +558,12 @@ if [ "$FULLSCREEN" = "true" ]; then
     CMD="$CMD -full-screen"
 fi
 
-# Display
-CMD="$CMD -display sdl"
+# Display and grab settings
+if [ "$GRAB_ON_CLICK" = "false" ]; then
+    CMD="$CMD -display sdl,grab-mod=rctrl"
+else
+    CMD="$CMD -display sdl"
+fi
 
 # Add custom arguments
 if [ -n "$CUSTOM_ARGS" ]; then
@@ -657,7 +740,7 @@ EOF
     print_status "Creating PHP control panel..."
     cat > /var/www/html/index.php << 'EOF'
 <?php
-// Mac OS 9 Emulator Control Panel with Configuration Management
+// Mac OS 9 Emulator Control Panel with Classic Mac OS 9 Interface Design
 
 $config_file = '/opt/retro-mac/qemu-config.json';
 $drives_dir = '/opt/retro-mac/drives';
@@ -684,7 +767,9 @@ function load_config() {
         'hard_drives' => [],
         'custom_args' => '',
         'network' => 'user',
-        'sound' => true
+        'sound' => true,
+        'pointer_mode' => 'usb-tablet',
+        'grab_on_click' => true
     ];
 }
 
@@ -731,6 +816,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $config['custom_args'] = $_POST['custom_args'] ?? '';
                 $config['network'] = $_POST['network'] ?? 'user';
                 $config['sound'] = isset($_POST['sound']);
+                $config['pointer_mode'] = $_POST['pointer_mode'] ?? 'usb-tablet';
+                $config['grab_on_click'] = isset($_POST['grab_on_click']);
                 save_config($config);
                 $message = 'Configuration saved successfully';
                 $message_type = 'success';
@@ -769,20 +856,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $message_type = 'success';
                 }
                 break;
-                
-            case 'add_existing_drive':
-                $drive_path = $_POST['existing_drive_path'] ?? '';
-                $drive_format = $_POST['existing_drive_format'] ?? 'qcow2';
-                if ($drive_path && file_exists($drive_path)) {
-                    $config['hard_drives'][] = ['path' => $drive_path, 'format' => $drive_format];
-                    save_config($config);
-                    $message = 'Drive added to configuration';
-                    $message_type = 'success';
-                } else {
-                    $message = 'Drive file not found';
-                    $message_type = 'error';
-                }
-                break;
         }
     }
 }
@@ -795,8 +868,7 @@ $hostname = gethostname();
 $uptime = shell_exec('uptime -p');
 $load = sys_getloadavg();
 $memory = shell_exec("free -h | grep Mem | awk '{print $3 \" / \" $2}'");
-$disk = shell_exec("df -h / | tail -1 | awk '{print $3 \" / \" $2 \" (\" $5 \" used)\"}'")
-;
+$disk = shell_exec("df -h / | tail -1 | awk '{print $3 \" / \" $2 \" (\" $5 \" used)\"}'");
 
 // Check QEMU status
 $qemu_status = trim(shell_exec('systemctl is-active qemu-mac.service'));
@@ -812,8 +884,13 @@ $cpu_cores = shell_exec("nproc");
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Retro Mac Emulator Control Panel</title>
+    <title>Mac OS 9 Control Panel</title>
     <style>
+        @font-face {
+            font-family: 'Chicago';
+            src: local('Chicago'), local('Geneva'), local('Helvetica'), sans-serif;
+        }
+        
         * {
             margin: 0;
             padding: 0;
@@ -821,293 +898,465 @@ $cpu_cores = shell_exec("nproc");
         }
         
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Chicago', 'Geneva', 'Helvetica', sans-serif;
+            font-size: 12px;
+            background: #DDDDDD;
+            background-image: 
+                repeating-linear-gradient(
+                    0deg,
+                    transparent,
+                    transparent 1px,
+                    #CCCCCC 1px,
+                    #CCCCCC 2px
+                );
+            color: #000000;
+            padding: 0;
+            margin: 0;
             min-height: 100vh;
-            padding: 20px;
         }
         
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-        }
-        
-        .header {
-            text-align: center;
-            color: white;
-            margin-bottom: 30px;
-            padding: 20px;
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 15px;
-            backdrop-filter: blur(10px);
-        }
-        
-        .header h1 {
-            font-size: 2.5em;
-            margin-bottom: 10px;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-        }
-        
-        .header p {
-            font-size: 1.2em;
-            opacity: 0.9;
-        }
-        
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
-            gap: 20px;
-            margin-bottom: 20px;
-        }
-        
-        .card {
-            background: white;
-            border-radius: 15px;
-            padding: 25px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-            transition: transform 0.3s ease;
-        }
-        
-        .config-section {
-            margin-bottom: 20px;
-        }
-        
-        .config-section label {
-            display: block;
-            font-weight: 600;
-            color: #666;
-            margin-bottom: 5px;
-        }
-        
-        .config-section input[type="text"],
-        .config-section input[type="number"],
-        .config-section select,
-        .config-section textarea {
-            width: 100%;
-            padding: 8px 12px;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-            font-size: 14px;
-            margin-bottom: 10px;
-        }
-        
-        .config-section textarea {
-            min-height: 60px;
-            resize: vertical;
-        }
-        
-        .checkbox-group {
-            margin: 10px 0;
-        }
-        
-        .checkbox-group input[type="checkbox"] {
-            margin-right: 8px;
-        }
-        
-        .drive-list {
-            max-height: 200px;
-            overflow-y: auto;
-            border: 1px solid #eee;
-            border-radius: 6px;
-            padding: 10px;
-            margin-bottom: 10px;
-        }
-        
-        .drive-item {
+        /* Mac OS 9 Desktop Menu Bar */
+        .menu-bar {
+            background: linear-gradient(to bottom, #FFFFFF 0%, #DDDDDD 50%, #BBBBBB 100%);
+            border-bottom: 1px solid #000000;
+            height: 20px;
             display: flex;
-            justify-content: space-between;
             align-items: center;
-            padding: 8px;
-            margin-bottom: 5px;
-            background: #f8f9fa;
-            border-radius: 4px;
-        }
-        
-        .drive-item button {
-            padding: 4px 8px;
+            padding: 0 10px;
+            font-weight: bold;
             font-size: 12px;
         }
         
-        .card:hover {
-            transform: translateY(-5px);
+        .menu-bar .apple-menu {
+            margin-right: 20px;
+            font-size: 14px;
         }
         
-        .card h2 {
-            color: #333;
-            margin-bottom: 20px;
-            padding-bottom: 10px;
-            border-bottom: 2px solid #667eea;
+        .menu-bar .menu-item {
+            margin-right: 15px;
+            cursor: default;
         }
         
-        .status-badge {
-            display: inline-block;
-            padding: 5px 15px;
-            border-radius: 20px;
+        .menu-bar .right-menu {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+        }
+        
+        /* Container */
+        .desktop {
+            padding: 20px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            justify-content: center;
+        }
+        
+        /* Classic Mac OS 9 Window */
+        .window {
+            background: #DDDDDD;
+            border: 1px solid #000000;
+            box-shadow: 2px 2px 0px #000000;
+            min-width: 400px;
+            max-width: 600px;
+        }
+        
+        /* Window Title Bar */
+        .window-titlebar {
+            background: linear-gradient(
+                to bottom,
+                #FFFFFF 0%,
+                #DDDDDD 45%,
+                #BBBBBB 50%,
+                #999999 100%
+            );
+            background-size: 100% 4px;
+            border-bottom: 1px solid #000000;
+            height: 20px;
+            display: flex;
+            align-items: center;
+            padding: 0 8px;
+            position: relative;
+            cursor: default;
+        }
+        
+        .window-titlebar.active {
+            background: repeating-linear-gradient(
+                to bottom,
+                #FFFFFF 0px,
+                #FFFFFF 1px,
+                #000000 1px,
+                #000000 2px,
+                #FFFFFF 2px,
+                #FFFFFF 3px,
+                #BBBBBB 3px,
+                #BBBBBB 4px
+            );
+        }
+        
+        /* Window Controls */
+        .window-controls {
+            display: flex;
+            gap: 8px;
+            margin-right: 8px;
+        }
+        
+        .window-control {
+            width: 12px;
+            height: 12px;
+            border: 1px solid #000000;
+            background: #DDDDDD;
+            box-shadow: inset 1px 1px 0px #FFFFFF, inset -1px -1px 0px #999999;
+        }
+        
+        .window-control.close {
+            background: #DDDDDD;
+        }
+        
+        .window-title {
+            flex: 1;
+            text-align: center;
             font-weight: bold;
-            font-size: 0.9em;
+            font-size: 12px;
         }
         
-        .status-running {
-            background: #4caf50;
-            color: white;
+        /* Window Content */
+        .window-content {
+            padding: 10px;
+            background: #DDDDDD;
         }
         
-        .status-stopped {
-            background: #f44336;
-            color: white;
+        /* Classic Mac Buttons */
+        .btn {
+            background: #DDDDDD;
+            border: 2px solid #000000;
+            border-radius: 5px;
+            padding: 4px 16px;
+            font-family: 'Chicago', 'Geneva', sans-serif;
+            font-size: 12px;
+            font-weight: bold;
+            cursor: pointer;
+            box-shadow: 
+                inset 1px 1px 0px #FFFFFF,
+                inset -1px -1px 0px #999999,
+                1px 1px 0px #000000;
+            min-width: 80px;
+            height: 24px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .btn:active {
+            box-shadow: 
+                inset -1px -1px 0px #FFFFFF,
+                inset 1px 1px 0px #999999;
+        }
+        
+        .btn:focus {
+            outline: 2px solid #000000;
+            outline-offset: 2px;
+        }
+        
+        .btn.default {
+            border: 3px solid #000000;
+        }
+        
+        .btn-start {
+            background: #CCFFCC;
+        }
+        
+        .btn-stop {
+            background: #FFCCCC;
+        }
+        
+        .btn-restart {
+            background: #FFFFCC;
+        }
+        
+        /* Classic Mac Input Fields */
+        input[type="text"],
+        input[type="number"],
+        select,
+        textarea {
+            background: #FFFFFF;
+            border: 1px solid #000000;
+            box-shadow: inset 1px 1px 0px #999999;
+            padding: 2px 4px;
+            font-family: 'Geneva', 'Monaco', monospace;
+            font-size: 12px;
+            width: 100%;
+        }
+        
+        select {
+            appearance: none;
+            background-image: url('data:image/svg+xml;utf8,<svg fill="black" height="8" viewBox="0 0 8 8" width="8" xmlns="http://www.w3.org/2000/svg"><path d="M0 2l4 4 4-4z"/></svg>');
+            background-repeat: no-repeat;
+            background-position: right 4px center;
+            padding-right: 20px;
+        }
+        
+        /* Classic Mac Checkbox */
+        input[type="checkbox"] {
+            appearance: none;
+            width: 12px;
+            height: 12px;
+            border: 1px solid #000000;
+            background: #FFFFFF;
+            box-shadow: inset 1px 1px 0px #999999;
+            vertical-align: middle;
+            margin-right: 4px;
+            cursor: pointer;
+        }
+        
+        input[type="checkbox"]:checked {
+            background: #FFFFFF;
+            position: relative;
+        }
+        
+        input[type="checkbox"]:checked::after {
+            content: "✓";
+            position: absolute;
+            top: -2px;
+            left: 1px;
+            font-size: 10px;
+            font-weight: bold;
+        }
+        
+        /* Form Groups */
+        .form-group {
+            margin-bottom: 10px;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 2px;
+            font-weight: bold;
+        }
+        
+        /* Info Box */
+        .info-box {
+            background: #FFFFFF;
+            border: 1px solid #000000;
+            box-shadow: inset 1px 1px 0px #999999;
+            padding: 8px;
+            margin-bottom: 10px;
         }
         
         .info-row {
             display: flex;
             justify-content: space-between;
-            padding: 10px 0;
-            border-bottom: 1px solid #eee;
-        }
-        
-        .info-row:last-child {
-            border-bottom: none;
+            padding: 2px 0;
         }
         
         .info-label {
-            font-weight: 600;
-            color: #666;
+            font-weight: bold;
         }
         
-        .info-value {
-            color: #333;
-            text-align: right;
+        /* Status Indicator */
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border: 1px solid #000000;
+            border-radius: 50%;
+            margin-left: 4px;
         }
         
-        .control-buttons {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
-            gap: 10px;
-            margin-top: 20px;
+        .status-indicator.running {
+            background: #00FF00;
         }
         
-        .btn {
-            padding: 12px 20px;
-            border: none;
-            border-radius: 8px;
-            font-size: 1em;
-            font-weight: 600;
+        .status-indicator.stopped {
+            background: #FF0000;
+        }
+        
+        /* Alert Box */
+        .alert {
+            background: #FFFFCC;
+            border: 2px solid #000000;
+            padding: 8px;
+            margin-bottom: 10px;
+            font-weight: bold;
+            box-shadow: 2px 2px 0px #000000;
+        }
+        
+        .alert.success {
+            background: #CCFFCC;
+        }
+        
+        .alert.error {
+            background: #FFCCCC;
+        }
+        
+        /* Drive List */
+        .drive-list {
+            background: #FFFFFF;
+            border: 1px solid #000000;
+            box-shadow: inset 1px 1px 0px #999999;
+            padding: 4px;
+            min-height: 60px;
+            max-height: 120px;
+            overflow-y: auto;
+            margin-bottom: 10px;
+        }
+        
+        .drive-item {
+            padding: 2px;
+            border-bottom: 1px dotted #999999;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .drive-item:last-child {
+            border-bottom: none;
+        }
+        
+        /* Button Groups */
+        .button-group {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+            justify-content: center;
+        }
+        
+        /* Tabs */
+        .tab-container {
+            margin-top: 10px;
+        }
+        
+        .tab-buttons {
+            display: flex;
+            border-bottom: 1px solid #000000;
+        }
+        
+        .tab-button {
+            background: #CCCCCC;
+            border: 1px solid #000000;
+            border-bottom: none;
+            padding: 4px 16px;
+            margin-right: 2px;
             cursor: pointer;
-            transition: all 0.3s ease;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
+            font-weight: bold;
+            position: relative;
+            top: 1px;
         }
         
-        .btn-start {
-            background: #4caf50;
-            color: white;
+        .tab-button.active {
+            background: #DDDDDD;
+            border-bottom: 1px solid #DDDDDD;
         }
         
-        .btn-start:hover:not(:disabled) {
-            background: #45a049;
+        .tab-content {
+            background: #DDDDDD;
+            border: 1px solid #000000;
+            border-top: none;
+            padding: 10px;
         }
         
-        .btn-stop {
-            background: #f44336;
-            color: white;
+        .tab-pane {
+            display: none;
         }
         
-        .btn-stop:hover:not(:disabled) {
-            background: #da190b;
+        .tab-pane.active {
+            display: block;
         }
         
-        .btn-restart {
-            background: #ff9800;
-            color: white;
+        /* Classic Mac Scrollbar */
+        ::-webkit-scrollbar {
+            width: 16px;
+            height: 16px;
         }
         
-        .btn-restart:hover:not(:disabled) {
-            background: #fb8c00;
+        ::-webkit-scrollbar-track {
+            background: #CCCCCC;
+            border: 1px solid #000000;
         }
         
-        .btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
+        ::-webkit-scrollbar-thumb {
+            background: #999999;
+            border: 1px solid #000000;
+            box-shadow: inset 1px 1px 0px #FFFFFF, inset -1px -1px 0px #666666;
         }
         
-        .message {
-            padding: 15px;
-            border-radius: 8px;
-            margin-bottom: 20px;
+        /* Desktop Icon */
+        .desktop-icon {
+            width: 64px;
             text-align: center;
-            font-weight: 600;
+            margin: 20px;
+            cursor: pointer;
         }
         
-        .message.success {
-            background: #d4edda;
-            color: #155724;
-            border: 1px solid #c3e6cb;
+        .desktop-icon img {
+            width: 32px;
+            height: 32px;
+            image-rendering: pixelated;
+            margin-bottom: 4px;
         }
         
-        .message.error {
-            background: #f8d7da;
-            color: #721c24;
-            border: 1px solid #f5c6cb;
+        .desktop-icon-label {
+            font-size: 10px;
+            background: white;
+            padding: 1px 3px;
+            border: 1px dotted transparent;
         }
         
-        .mac-icon {
-            width: 50px;
-            height: 50px;
-            margin: 0 auto 20px;
-            background: url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA0OTYgNTEyIj48cGF0aCBmaWxsPSIjOTk5IiBkPSJNMzE1LjQgMGMtNC4yIDAtOC40LjMtMTIuNS45QzI3OS4xIDkuNyAyNDYuMiA0NC4xIDI0Ni4yIDg1LjFjMCA3LjkgMS4yIDE1LjYgMy40IDIyLjktMy45LS4yLTcuOS0uMy0xMS45LS4zLTEwMy41IDAtMTg4IDg0LjUtMTg4IDE4OC4zcy04NC41IDE4OC4xIDE4OCAxODguMSAxODgtODQuNSAxODgtMTg4LjFjMC00LjQtLjItOC44LS40LTEzLjEgNy40IDIuMiAxNS4yIDMuNCAyMy4xIDMuNCAxMS4xIDAgMjItMi40IDMxLjktNy4xVjUwNC4xSDQ5NlY2OS40QzQ5NiAzMS4xIDQ2NC45IDAgNDI2LjYgMGgtMTExLjJ6TTMxNS40IDY0aDExMS4yYzMuNyAwIDYuNyAzIDYuNyA2Ljd2MTkzLjVjLTQuOS0xLjgtMTAuMi0yLjgtMTUuNy0yLjhoLTEwMi4yYy0yMS4xIDAtMzguMyAxNy4yLTM4LjMgMzguM3YxMDIuMmMwIDUuNSAxIDEwLjggMi44IDE1LjdIMTg2LjNjLTUzLjMgMC05Ni43LTQzLjQtOTYuNy05Ni43czQzLjQtOTYuNyA5Ni43LTk2LjdjMjYuMSAwIDQ5LjggMTAuNCA2Ny4yIDI3LjJsNDcuOS00Ny45Yy0xNy44LTE2LjgtMjcuNi00MC0yNy42LTY0LjggMC0yMC43IDctMzkuNyAxOC42LTU0LjkgMTQuMS0xOC41IDM1LjgtMzAuOCA2MC0zMC44eiIvPjwvc3ZnPg==') no-repeat center;
-            background-size: contain;
-        }
-        
-        @media (max-width: 768px) {
-            .grid {
-                grid-template-columns: 1fr;
-            }
-            
-            .header h1 {
-                font-size: 2em;
-            }
+        .desktop-icon:hover .desktop-icon-label {
+            border: 1px dotted black;
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <div class="mac-icon"></div>
-            <h1>Retro Mac Emulator Control Panel</h1>
-            <p>Mac OS 9.2.1 PowerPC Emulation System</p>
+    <!-- Mac OS 9 Menu Bar -->
+    <div class="menu-bar">
+        <span class="apple-menu">🍎</span>
+        <span class="menu-item">File</span>
+        <span class="menu-item">Edit</span>
+        <span class="menu-item">View</span>
+        <span class="menu-item">Special</span>
+        <span class="menu-item">Help</span>
+        <div class="right-menu">
+            <span><?php echo date('g:i A'); ?></span>
         </div>
-        
+    </div>
+    
+    <div class="desktop">
         <?php if ($message): ?>
-        <div class="message <?php echo $message_type; ?>">
+        <div class="alert <?php echo $message_type; ?>">
             <?php echo htmlspecialchars($message); ?>
         </div>
         <?php endif; ?>
         
-        <div class="grid">
-            <div class="card">
-                <h2>QEMU Emulator Status</h2>
-                <div class="info-row">
-                    <span class="info-label">Status:</span>
-                    <span class="info-value">
-                        <span class="status-badge <?php echo $qemu_running ? 'status-running' : 'status-stopped'; ?>">
-                            <?php echo $qemu_running ? 'RUNNING' : 'STOPPED'; ?>
+        <!-- QEMU Control Window -->
+        <div class="window">
+            <div class="window-titlebar active">
+                <div class="window-controls">
+                    <div class="window-control close"></div>
+                </div>
+                <div class="window-title">Mac OS 9 Emulator Control</div>
+            </div>
+            <div class="window-content">
+                <div class="info-box">
+                    <div class="info-row">
+                        <span class="info-label">Status:</span>
+                        <span>
+                            <?php echo $qemu_running ? 'Running' : 'Stopped'; ?>
+                            <span class="status-indicator <?php echo $qemu_running ? 'running' : 'stopped'; ?>"></span>
                         </span>
-                    </span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Emulated System:</span>
-                    <span class="info-value">Mac OS 9.2.1</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Architecture:</span>
-                    <span class="info-value">PowerPC G4</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Memory:</span>
-                    <span class="info-value">512 MB</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Host:</span>
+                        <span><?php echo htmlspecialchars($hostname); ?></span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Uptime:</span>
+                        <span><?php echo htmlspecialchars(trim($uptime)); ?></span>
+                    </div>
                 </div>
                 
                 <form method="post" action="">
-                    <div class="control-buttons">
+                    <div class="button-group">
                         <button type="submit" name="action" value="start" class="btn btn-start" 
                                 <?php echo $qemu_running ? 'disabled' : ''; ?>>
                             Start
@@ -1122,239 +1371,221 @@ $cpu_cores = shell_exec("nproc");
                     </div>
                 </form>
             </div>
-            
-            <div class="card">
-                <h2>QEMU Configuration</h2>
-                <form method="post" action="">
-                    <div class="config-section">
-                        <label for="ram">RAM (MB):</label>
-                        <input type="number" id="ram" name="ram" value="<?php echo htmlspecialchars($config['ram']); ?>" min="128" max="8192">
-                    </div>
-                    
-                    <div class="config-section">
-                        <label for="cpu">CPU Type:</label>
-                        <select id="cpu" name="cpu">
-                            <option value="g3" <?php echo $config['cpu'] === 'g3' ? 'selected' : ''; ?>>PowerPC G3</option>
-                            <option value="g4" <?php echo $config['cpu'] === 'g4' ? 'selected' : ''; ?>>PowerPC G4</option>
-                            <option value="750" <?php echo $config['cpu'] === '750' ? 'selected' : ''; ?>>PowerPC 750</option>
-                            <option value="7400" <?php echo $config['cpu'] === '7400' ? 'selected' : ''; ?>>PowerPC 7400</option>
-                            <option value="7410" <?php echo $config['cpu'] === '7410' ? 'selected' : ''; ?>>PowerPC 7410</option>
-                            <option value="7450" <?php echo $config['cpu'] === '7450' ? 'selected' : ''; ?>>PowerPC 7450</option>
-                        </select>
-                    </div>
-                    
-                    <div class="config-section">
-                        <label for="resolution">Resolution:</label>
-                        <select id="resolution" name="resolution">
-                            <option value="640x480x8" <?php echo $config['resolution'] === '640x480x8' ? 'selected' : ''; ?>>640x480 (8-bit)</option>
-                            <option value="800x600x16" <?php echo $config['resolution'] === '800x600x16' ? 'selected' : ''; ?>>800x600 (16-bit)</option>
-                            <option value="1024x768x32" <?php echo $config['resolution'] === '1024x768x32' ? 'selected' : ''; ?>>1024x768 (32-bit)</option>
-                            <option value="1280x1024x32" <?php echo $config['resolution'] === '1280x1024x32' ? 'selected' : ''; ?>>1280x1024 (32-bit)</option>
-                            <option value="1920x1080x32" <?php echo $config['resolution'] === '1920x1080x32' ? 'selected' : ''; ?>>1920x1080 (32-bit)</option>
-                        </select>
-                    </div>
-                    
-                    <div class="config-section">
-                        <label for="boot_device">Boot Device:</label>
-                        <select id="boot_device" name="boot_device">
-                            <option value="d" <?php echo $config['boot_device'] === 'd' ? 'selected' : ''; ?>>CD-ROM</option>
-                            <option value="c" <?php echo $config['boot_device'] === 'c' ? 'selected' : ''; ?>>Hard Drive</option>
-                            <option value="n" <?php echo $config['boot_device'] === 'n' ? 'selected' : ''; ?>>Network</option>
-                        </select>
-                    </div>
-                    
-                    <div class="config-section">
-                        <label for="network">Network:</label>
-                        <select id="network" name="network">
-                            <option value="user" <?php echo $config['network'] === 'user' ? 'selected' : ''; ?>>User Mode (NAT)</option>
-                            <option value="none" <?php echo $config['network'] === 'none' ? 'selected' : ''; ?>>Disabled</option>
-                        </select>
-                    </div>
-                    
-                    <div class="checkbox-group">
-                        <label>
-                            <input type="checkbox" name="fullscreen" <?php echo $config['fullscreen'] ? 'checked' : ''; ?>>
-                            Fullscreen Mode
-                        </label>
-                    </div>
-                    
-                    <div class="checkbox-group">
-                        <label>
-                            <input type="checkbox" name="sound" <?php echo $config['sound'] ? 'checked' : ''; ?>>
-                            Enable Sound
-                        </label>
-                    </div>
-                    
-                    <div class="config-section">
-                        <label for="custom_args">Custom QEMU Arguments:</label>
-                        <textarea id="custom_args" name="custom_args" placeholder="Additional QEMU arguments (optional)"><?php echo htmlspecialchars($config['custom_args']); ?></textarea>
-                    </div>
-                    
-                    <button type="submit" name="action" value="save_config" class="btn btn-start">Save Configuration</button>
-                </form>
+        </div>
+        
+        <!-- Configuration Window -->
+        <div class="window">
+            <div class="window-titlebar active">
+                <div class="window-controls">
+                    <div class="window-control close"></div>
+                </div>
+                <div class="window-title">Configuration</div>
             </div>
-            
-            <div class="card">
-                <h2>Hard Drive Management</h2>
-                
-                <h3 style="margin-bottom: 15px;">Current Drives</h3>
-                <div class="drive-list">
-                    <?php if (empty($config['hard_drives'])): ?>
-                        <p style="color: #666;">No hard drives configured</p>
-                    <?php else: ?>
-                        <?php foreach ($config['hard_drives'] as $index => $drive): ?>
-                            <div class="drive-item">
-                                <span><?php echo htmlspecialchars(basename($drive['path'])); ?> (<?php echo htmlspecialchars($drive['format']); ?>)</span>
-                                <form method="post" action="" style="display: inline;">
-                                    <input type="hidden" name="drive_index" value="<?php echo $index; ?>">
-                                    <button type="submit" name="action" value="remove_drive" class="btn btn-stop" onclick="return confirm('Remove this drive from configuration?');">Remove</button>
-                                </form>
+            <div class="window-content">
+                <div class="tab-container">
+                    <div class="tab-buttons">
+                        <div class="tab-button active" onclick="switchTab('general')">General</div>
+                        <div class="tab-button" onclick="switchTab('drives')">Drives</div>
+                        <div class="tab-button" onclick="switchTab('advanced')">Advanced</div>
+                    </div>
+                    
+                    <div class="tab-content">
+                        <!-- General Tab -->
+                        <div class="tab-pane active" id="general-tab">
+                            <form method="post" action="">
+                                <div class="form-group">
+                                    <label>Memory (MB):</label>
+                                    <input type="number" name="ram" value="<?php echo htmlspecialchars($config['ram']); ?>" min="128" max="8192">
+                                </div>
+                                
+                                <div class="form-group">
+                                    <label>Processor:</label>
+                                    <select name="cpu">
+                                        <option value="g3" <?php echo $config['cpu'] === 'g3' ? 'selected' : ''; ?>>PowerPC G3</option>
+                                        <option value="g4" <?php echo $config['cpu'] === 'g4' ? 'selected' : ''; ?>>PowerPC G4</option>
+                                        <option value="750" <?php echo $config['cpu'] === '750' ? 'selected' : ''; ?>>PowerPC 750</option>
+                                    </select>
+                                </div>
+                                
+                                <div class="form-group">
+                                    <label>Display:</label>
+                                    <select name="resolution">
+                                        <option value="640x480x8" <?php echo $config['resolution'] === '640x480x8' ? 'selected' : ''; ?>>640×480 (256 colors)</option>
+                                        <option value="800x600x16" <?php echo $config['resolution'] === '800x600x16' ? 'selected' : ''; ?>>800×600 (Thousands)</option>
+                                        <option value="1024x768x32" <?php echo $config['resolution'] === '1024x768x32' ? 'selected' : ''; ?>>1024×768 (Millions)</option>
+                                    </select>
+                                </div>
+                                
+                                <div class="form-group">
+                                    <label>
+                                        <input type="checkbox" name="fullscreen" <?php echo $config['fullscreen'] ? 'checked' : ''; ?>>
+                                        Full Screen
+                                    </label>
+                                </div>
+                                
+                                <div class="form-group">
+                                    <label>
+                                        <input type="checkbox" name="sound" <?php echo $config['sound'] ? 'checked' : ''; ?>>
+                                        Enable Sound
+                                    </label>
+                                </div>
+                                
+                                <div class="button-group">
+                                    <button type="submit" name="action" value="save_config" class="btn default">Save</button>
+                                </div>
+                            </form>
+                        </div>
+                        
+                        <!-- Drives Tab -->
+                        <div class="tab-pane" id="drives-tab">
+                            <div class="form-group">
+                                <label>Mounted Drives:</label>
+                                <div class="drive-list">
+                                    <?php if (empty($config['hard_drives'])): ?>
+                                        <div style="color: #999; text-align: center; padding: 20px;">No drives mounted</div>
+                                    <?php else: ?>
+                                        <?php foreach ($config['hard_drives'] as $index => $drive): ?>
+                                            <div class="drive-item">
+                                                <span>📁 <?php echo htmlspecialchars(basename($drive['path'])); ?></span>
+                                                <form method="post" action="" style="display: inline;">
+                                                    <input type="hidden" name="drive_index" value="<?php echo $index; ?>">
+                                                    <button type="submit" name="action" value="remove_drive" class="btn" style="padding: 2px 8px; min-width: 50px; height: 20px;">Eject</button>
+                                                </form>
+                                            </div>
+                                        <?php endforeach; ?>
+                                    <?php endif; ?>
+                                </div>
                             </div>
-                        <?php endforeach; ?>
-                    <?php endif; ?>
-                </div>
-                
-                <h3 style="margin: 20px 0 15px;">Create New Drive</h3>
-                <form method="post" action="">
-                    <div class="config-section">
-                        <label for="drive_name">Drive Name:</label>
-                        <input type="text" id="drive_name" name="drive_name" placeholder="e.g., macos_hd" pattern="[a-zA-Z0-9_-]+" required>
+                            
+                            <form method="post" action="">
+                                <div class="form-group">
+                                    <label>Create New Drive:</label>
+                                    <input type="text" name="drive_name" placeholder="Drive name" required>
+                                </div>
+                                <div class="form-group">
+                                    <label>Size:</label>
+                                    <select name="drive_size">
+                                        <option value="500M">500 MB</option>
+                                        <option value="1G">1 GB</option>
+                                        <option value="2G" selected>2 GB</option>
+                                        <option value="4G">4 GB</option>
+                                    </select>
+                                </div>
+                                <div class="button-group">
+                                    <button type="submit" name="action" value="create_drive" class="btn">Create</button>
+                                </div>
+                            </form>
+                        </div>
+                        
+                        <!-- Advanced Tab -->
+                        <div class="tab-pane" id="advanced-tab">
+                            <form method="post" action="">
+                                <div class="form-group">
+                                    <label>Boot Device:</label>
+                                    <select name="boot_device">
+                                        <option value="d" <?php echo $config['boot_device'] === 'd' ? 'selected' : ''; ?>>CD-ROM</option>
+                                        <option value="c" <?php echo $config['boot_device'] === 'c' ? 'selected' : ''; ?>>Hard Drive</option>
+                                    </select>
+                                </div>
+                                
+                                <div class="form-group">
+                                    <label>Network:</label>
+                                    <select name="network">
+                                        <option value="user" <?php echo $config['network'] === 'user' ? 'selected' : ''; ?>>User Mode (NAT)</option>
+                                        <option value="none" <?php echo $config['network'] === 'none' ? 'selected' : ''; ?>>Disabled</option>
+                                    </select>
+                                </div>
+                                
+                                <div class="form-group">
+                                    <label>Pointer Control:</label>
+                                    <select name="pointer_mode">
+                                        <option value="usb-tablet" <?php echo ($config['pointer_mode'] ?? 'usb-tablet') === 'usb-tablet' ? 'selected' : ''; ?>>USB Tablet (Seamless)</option>
+                                        <option value="usb-mouse" <?php echo ($config['pointer_mode'] ?? '') === 'usb-mouse' ? 'selected' : ''; ?>>USB Mouse (Grab Required)</option>
+                                        <option value="ps2" <?php echo ($config['pointer_mode'] ?? '') === 'ps2' ? 'selected' : ''; ?>>PS/2 Mouse (Legacy)</option>
+                                    </select>
+                                    <div style="font-size: 10px; color: #666; margin-top: 2px;">
+                                        USB Tablet: Best for windowed mode, no grab needed<br>
+                                        USB Mouse: Traditional mode, click to grab/ungrab<br>
+                                        PS/2: Legacy support for older systems
+                                    </div>
+                                </div>
+                                
+                                <div class="form-group">
+                                    <label>
+                                        <input type="checkbox" name="grab_on_click" <?php echo ($config['grab_on_click'] ?? true) ? 'checked' : ''; ?>>
+                                        Grab mouse on click (USB Mouse mode)
+                                    </label>
+                                    <div style="font-size: 10px; color: #666; margin-top: 2px;">
+                                        When unchecked, use right-Ctrl to grab/ungrab mouse
+                                    </div>
+                                </div>
+                                
+                                <div class="form-group">
+                                    <label>Custom Arguments:</label>
+                                    <textarea name="custom_args" rows="3"><?php echo htmlspecialchars($config['custom_args']); ?></textarea>
+                                </div>
+                                
+                                <div class="button-group">
+                                    <button type="submit" name="action" value="save_config" class="btn default">Save</button>
+                                </div>
+                            </form>
+                        </div>
                     </div>
-                    
-                    <div class="config-section">
-                        <label for="drive_size">Size:</label>
-                        <input type="text" id="drive_size" name="drive_size" value="2G" placeholder="e.g., 2G, 500M" required>
-                    </div>
-                    
-                    <div class="config-section">
-                        <label for="drive_format">Format:</label>
-                        <select id="drive_format" name="drive_format">
-                            <option value="qcow2">QCOW2 (Recommended)</option>
-                            <option value="raw">RAW</option>
-                            <option value="vmdk">VMDK</option>
-                        </select>
-                    </div>
-                    
-                    <button type="submit" name="action" value="create_drive" class="btn btn-start">Create Drive</button>
-                </form>
-                
-                <h3 style="margin: 20px 0 15px;">Add Existing Drive</h3>
-                <form method="post" action="">
-                    <div class="config-section">
-                        <label for="existing_drive_path">Drive Path:</label>
-                        <input type="text" id="existing_drive_path" name="existing_drive_path" placeholder="/path/to/drive.qcow2" required>
-                    </div>
-                    
-                    <div class="config-section">
-                        <label for="existing_drive_format">Format:</label>
-                        <select id="existing_drive_format" name="existing_drive_format">
-                            <option value="qcow2">QCOW2</option>
-                            <option value="raw">RAW</option>
-                            <option value="vmdk">VMDK</option>
-                        </select>
-                    </div>
-                    
-                    <button type="submit" name="action" value="add_existing_drive" class="btn btn-start">Add Drive</button>
-                </form>
-            </div>
-            
-            <div class="card">
-                <h2>System Information</h2>
-                <div class="info-row">
-                    <span class="info-label">Hostname:</span>
-                    <span class="info-value"><?php echo htmlspecialchars($hostname); ?></span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Uptime:</span>
-                    <span class="info-value"><?php echo htmlspecialchars(trim($uptime)); ?></span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">CPU:</span>
-                    <span class="info-value"><?php echo htmlspecialchars(trim($cpu_info)); ?></span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">CPU Cores:</span>
-                    <span class="info-value"><?php echo htmlspecialchars(trim($cpu_cores)); ?></span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Load Average:</span>
-                    <span class="info-value"><?php echo number_format($load[0], 2) . ', ' . number_format($load[1], 2) . ', ' . number_format($load[2], 2); ?></span>
-                </div>
-            </div>
-            
-            <div class="card">
-                <h2>Resource Usage</h2>
-                <div class="info-row">
-                    <span class="info-label">Memory:</span>
-                    <span class="info-value"><?php echo htmlspecialchars(trim($memory)); ?></span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Disk Usage:</span>
-                    <span class="info-value"><?php echo htmlspecialchars(trim($disk)); ?></span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">ISO Location:</span>
-                    <span class="info-value">/opt/retro-mac/</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">ISO File:</span>
-                    <span class="info-value">
-                        <?php 
-                        if (file_exists('/opt/retro-mac/macos_921_ppc.iso')) {
-                            $size = filesize('/opt/retro-mac/macos_921_ppc.iso');
-                            echo 'Present (' . number_format($size / 1048576, 1) . ' MB)';
-                        } else {
-                            echo 'Not found';
-                        }
-                        ?>
-                    </span>
-                </div>
-            </div>
-            
-            <div class="card">
-                <h2>Services Status</h2>
-                <div class="info-row">
-                    <span class="info-label">Apache Web Server:</span>
-                    <span class="info-value">
-                        <?php 
-                        $apache_status = trim(shell_exec('systemctl is-active apache2'));
-                        echo $apache_status === 'active' ? '✅ Running' : '❌ Stopped';
-                        ?>
-                    </span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">QEMU Service:</span>
-                    <span class="info-value">
-                        <?php echo $qemu_running ? '✅ Running' : '❌ Stopped'; ?>
-                    </span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Plymouth:</span>
-                    <span class="info-value">
-                        <?php 
-                        $plymouth_installed = shell_exec('which plymouth');
-                        echo $plymouth_installed ? '✅ Installed' : '❌ Not Installed';
-                        ?>
-                    </span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">PHP Version:</span>
-                    <span class="info-value"><?php echo phpversion(); ?></span>
                 </div>
             </div>
         </div>
         
-        <div class="card" style="text-align: center; background: rgba(255,255,255,0.9);">
-            <p style="color: #666; margin: 0;">
-                Retro Mac Emulator System • 
-                <a href="https://github.com" style="color: #667eea; text-decoration: none;">Documentation</a> • 
-                Last updated: <?php echo date('Y-m-d H:i:s'); ?>
-            </p>
+        <!-- System Info Window -->
+        <div class="window">
+            <div class="window-titlebar active">
+                <div class="window-controls">
+                    <div class="window-control close"></div>
+                </div>
+                <div class="window-title">System Information</div>
+            </div>
+            <div class="window-content">
+                <div class="info-box">
+                    <div class="info-row">
+                        <span class="info-label">CPU:</span>
+                        <span><?php echo htmlspecialchars(trim($cpu_info)); ?></span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Cores:</span>
+                        <span><?php echo htmlspecialchars(trim($cpu_cores)); ?></span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Memory:</span>
+                        <span><?php echo htmlspecialchars(trim($memory)); ?></span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Disk:</span>
+                        <span><?php echo htmlspecialchars(trim($disk)); ?></span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Load:</span>
+                        <span><?php echo number_format($load[0], 2); ?></span>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
     
     <script>
-        // Auto-refresh page every 30 seconds
+        function switchTab(tabName) {
+            // Hide all tabs
+            document.querySelectorAll('.tab-pane').forEach(function(pane) {
+                pane.classList.remove('active');
+            });
+            document.querySelectorAll('.tab-button').forEach(function(button) {
+                button.classList.remove('active');
+            });
+            
+            // Show selected tab
+            document.getElementById(tabName + '-tab').classList.add('active');
+            event.target.classList.add('active');
+        }
+        
+        // Auto-refresh every 30 seconds
         setTimeout(function() {
             location.reload();
         }, 30000);
